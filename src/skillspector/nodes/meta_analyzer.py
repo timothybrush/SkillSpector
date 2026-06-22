@@ -63,7 +63,10 @@ class MetaAnalyzerFinding(BaseModel):
         description="The end line number from the finding's Location, if available.",
     )
     is_vulnerability: bool = Field(description="Whether this is a true vulnerability")
-    confidence: float = Field(ge=0.0, le=1.0, description="Confidence score between 0.0 and 1.0")
+    # No ge/le bound on purpose: Pydantic bounds emit JSON-schema
+    # minimum/maximum, which some OpenAI-compatible structured-output endpoints
+    # reject. The range is enforced by the validator below instead.
+    confidence: float = Field(description="Confidence score between 0.0 and 1.0")
     intent: Literal["malicious", "negligent", "benign"] = Field(
         description="Likely intent behind the finding"
     )
@@ -72,6 +75,13 @@ class MetaAnalyzerFinding(BaseModel):
     )
     explanation: str = Field(default="", description="Why this is dangerous (2-3 sentences)")
     remediation: str = Field(default="", description="How to fix the issue (actionable steps)")
+
+    @field_validator("confidence")
+    @classmethod
+    def _clamp_confidence(cls, v: float) -> float:
+        # Clamp into [0.0, 1.0] so a slightly out-of-range model value
+        # normalises instead of failing the structured-output parse.
+        return min(1.0, max(0.0, v))
 
 
 class OverallAssessment(BaseModel):
@@ -86,6 +96,18 @@ class MetaAnalyzerResult(BaseModel):
 
     findings: list[MetaAnalyzerFinding] = Field(default_factory=list)
     overall_assessment: OverallAssessment | None = None
+
+    @field_validator("findings", mode="before")
+    @classmethod
+    def _parse_stringified_findings(cls, v: object) -> object:
+        """LLMs sometimes return the findings array as a JSON string."""
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return []
+            return parsed if isinstance(parsed, list) else []
+        return v
 
     @field_validator("overall_assessment", mode="before")
     @classmethod
@@ -282,6 +304,8 @@ class LLMMetaAnalyzer(LLMAnalyzerBase):
         """
         _enrichment = tuple[str, str, float]
         confirmed_granular: dict[tuple[str, str, int, int | None], _enrichment] = {}
+        # Fallback index keyed without end_line (see lookup below). Issue #67.
+        confirmed_by_start: dict[tuple[str, str, int], _enrichment] = {}
         confirmed_coarse: dict[tuple[str, str], _enrichment] = {}
 
         for batch, llm_items in batch_results:
@@ -308,6 +332,7 @@ class LLMMetaAnalyzer(LLMAnalyzerBase):
                             int(end_line) if end_line is not None else None,
                         )
                     ] = enrichment
+                    confirmed_by_start[(file_path, pattern_id, int(start_line))] = enrichment
                 else:
                     confirmed_coarse[(file_path, pattern_id)] = enrichment
 
@@ -316,10 +341,13 @@ class LLMMetaAnalyzer(LLMAnalyzerBase):
             exact_key = (f.file, f.rule_id, f.start_line, f.end_line)
             start_only_key = (f.file, f.rule_id, f.start_line, None)
             coarse_key = (f.file, f.rule_id)
+            start_key = (f.file, f.rule_id, f.start_line) if f.start_line is not None else None
             if exact_key in confirmed_granular:
                 expl, rem, conf = confirmed_granular[exact_key]
             elif start_only_key in confirmed_granular:
                 expl, rem, conf = confirmed_granular[start_only_key]
+            elif f.end_line is None and start_key is not None and start_key in confirmed_by_start:
+                expl, rem, conf = confirmed_by_start[start_key]
             elif coarse_key in confirmed_coarse:
                 expl, rem, conf = confirmed_coarse[coarse_key]
             else:
