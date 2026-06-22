@@ -215,30 +215,55 @@ def _format_findings_for_prompt(findings: list[Finding]) -> str:
     return "\n".join(lines)
 
 
+_NO_LLM_CONFIDENCE_THRESHOLD = 0.4
+
+
 def _fallback_filtered(findings: list[Finding]) -> list[Finding]:
-    """Apply default remediation to all findings (pass-through with defaults)."""
-    return [
-        Finding(
-            rule_id=f.rule_id,
-            message=f.message,
-            severity=f.severity,
-            confidence=f.confidence,
-            file=f.file,
-            start_line=f.start_line,
-            end_line=f.end_line,
-            remediation=f.remediation or get_remediation(f.rule_id),
-            tags=f.tags,
-            context=f.context,
-            matched_text=f.matched_text,
-            category=getattr(f, "category", None),
-            pattern=getattr(f, "pattern", None),
-            finding=getattr(f, "finding", None),
-            explanation=getattr(f, "explanation", None),
-            code_snippet=getattr(f, "code_snippet", None) or f.context,
-            intent=None,
+    """Heuristic fallback filter for --no-llm mode.
+
+    Applies rule-based filtering when LLM analysis is unavailable:
+    1. Drop findings with confidence below threshold (0.4)
+    2. Filter findings whose context is a code example or documentation
+    3. Apply default remediations from pattern_defaults
+
+    This prevents raw unfiltered static analysis from going directly into
+    the final report, reducing false positive noise without LLM calls.
+    """
+    from skillspector.nodes.analyzers.common import is_code_example
+
+    result: list[Finding] = []
+    for f in findings:
+        if f.confidence < _NO_LLM_CONFIDENCE_THRESHOLD:
+            continue
+        if f.context and is_code_example(f.context):
+            continue
+        result.append(
+            Finding(
+                rule_id=f.rule_id,
+                message=f.message,
+                severity=f.severity,
+                confidence=f.confidence,
+                file=f.file,
+                start_line=f.start_line,
+                end_line=f.end_line,
+                remediation=f.remediation or get_remediation(f.rule_id),
+                tags=f.tags,
+                context=f.context,
+                matched_text=f.matched_text,
+                category=getattr(f, "category", None),
+                pattern=getattr(f, "pattern", None),
+                finding=getattr(f, "finding", None),
+                explanation=getattr(f, "explanation", None),
+                code_snippet=getattr(f, "code_snippet", None) or f.context,
+                intent=None,
+            )
         )
-        for f in findings
-    ]
+    logger.info(
+        "Heuristic fallback filter (--no-llm): %d → %d findings",
+        len(findings),
+        len(result),
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
