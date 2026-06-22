@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -295,6 +296,40 @@ class TestBaseParseResponse:
         batch = Batch(file_path="a.py", content="code")
         with pytest.raises(NotImplementedError):
             analyzer.parse_response("raw string", batch)
+
+
+# ---------------------------------------------------------------------------
+# MetaAnalyzerResult — tolerate LLMs that stringify the `findings` array
+# ---------------------------------------------------------------------------
+
+
+class TestMetaAnalyzerResultFindingsValidator:
+    _FINDING = {
+        "pattern_id": "E2",
+        "start_line": 12,
+        "is_vulnerability": True,
+        "confidence": 0.9,
+        "intent": "malicious",
+        "impact": "high",
+    }
+
+    def test_findings_as_json_string(self) -> None:
+        """Some LLMs return the findings array as a JSON string, not a list."""
+        result = MetaAnalyzerResult.model_validate({"findings": json.dumps([self._FINDING])})
+        assert len(result.findings) == 1
+        assert result.findings[0].pattern_id == "E2"
+
+    def test_findings_as_native_list(self) -> None:
+        result = MetaAnalyzerResult.model_validate({"findings": [self._FINDING]})
+        assert len(result.findings) == 1
+
+    def test_findings_invalid_string_yields_empty(self) -> None:
+        result = MetaAnalyzerResult.model_validate({"findings": "not json"})
+        assert result.findings == []
+
+    def test_findings_non_list_json_yields_empty(self) -> None:
+        result = MetaAnalyzerResult.model_validate({"findings": json.dumps({"a": 1})})
+        assert result.findings == []
 
 
 # ---------------------------------------------------------------------------

@@ -87,6 +87,18 @@ class MetaAnalyzerResult(BaseModel):
     findings: list[MetaAnalyzerFinding] = Field(default_factory=list)
     overall_assessment: OverallAssessment | None = None
 
+    @field_validator("findings", mode="before")
+    @classmethod
+    def _parse_stringified_findings(cls, v: object) -> object:
+        """LLMs sometimes return the findings array as a JSON string."""
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return []
+            return parsed if isinstance(parsed, list) else []
+        return v
+
     @field_validator("overall_assessment", mode="before")
     @classmethod
     def _parse_stringified_assessment(cls, v: object) -> object:
