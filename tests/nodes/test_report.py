@@ -146,8 +146,9 @@ class TestComputeRiskScoreExecutableMultiplier:
     """Tests for the executable scripts multiplier."""
 
     def test_executable_multiplier_applies(self) -> None:
-        findings = [_finding("R1", "HIGH", confidence=1.0)]
-        score, _, _ = _compute_risk_score(findings, True)
+        findings = [_finding("R1", "HIGH", confidence=1.0, file="run.py")]
+        component_metadata = [{"path": "run.py", "executable": True}]
+        score, _, _ = _compute_risk_score(findings, True, component_metadata)
         # 25 * 1.3 = 32.5 -> 32
         assert score == 32
 
@@ -204,6 +205,21 @@ class TestComputeRiskScoreEdgeCases:
         ]
         score, _, _ = _compute_risk_score(findings, False)
         # First TM1: 50*1.0, second TM1: 5*0.5 = 2.5 -> total 52.5 -> 52
+        assert score == 52
+
+    def test_same_rule_low_before_critical_sorted_correctly(self) -> None:
+        """LOW before CRITICAL in input order must still score as if CRITICAL came first.
+
+        Without severity sorting, LOW gets the full weight (5*1.0=5) and CRITICAL
+        gets the diminished weight (50*0.5=25), yielding 30. With sorting, CRITICAL
+        gets full weight (50*1.0=50) and LOW gets diminished (5*0.5=2.5), yielding 52.
+        """
+        findings = [
+            _finding("TM1", "LOW", confidence=1.0),
+            _finding("TM1", "CRITICAL", confidence=1.0),
+        ]
+        score, _, _ = _compute_risk_score(findings, False)
+        # Sorted: CRITICAL first (50*1.0) + LOW second (5*0.5=2.5) = 52.5 -> 52
         assert score == 52
 
     def test_exact_band_boundary_21_is_medium(self) -> None:
@@ -387,8 +403,8 @@ class TestReportNode:
         """has_executable_scripts applies 1.3x to risk score."""
         state: SkillspectorState = {
             "filtered_findings": [
-                _finding("E2", "HIGH", confidence=1.0),
-                _finding("PE3", "HIGH", confidence=1.0),
+                _finding("E2", "HIGH", confidence=1.0, file="run.py"),
+                _finding("PE3", "HIGH", confidence=1.0, file="run.py"),
             ],
             "component_metadata": [
                 {
@@ -626,3 +642,54 @@ def test_report_no_baseline_unchanged() -> None:
     result = report(state)
     assert result["risk_score"] == 50
     assert result["suppressed_findings"] == []
+
+
+def test_report_executable_scripts_multiplier() -> None:
+    """1.3x multiplier applied only to findings from executable files."""
+    # 2 HIGH findings in run.py = 2 × 25 × 1.3 = 65 (float-based accumulation)
+    state: SkillspectorState = {
+        "filtered_findings": [
+            _finding("E2", "HIGH", file="run.py"),
+            _finding("PE3", "HIGH", file="run.py"),
+        ],
+        "component_metadata": [
+            {"path": "run.py", "type": "python", "lines": 5, "executable": True, "size_bytes": 200}
+        ],
+        "has_executable_scripts": True,
+        "manifest": {},
+        "skill_path": "/tmp/skill",
+        "output_format": "json",
+    }
+    result = report(state)
+    assert result["risk_score"] == 65
+    assert result["risk_severity"] == "HIGH"
+    assert result["risk_recommendation"] == "DO_NOT_INSTALL"
+
+
+def test_report_doc_findings_no_multiplier() -> None:
+    """Findings from non-executable files (markdown/docs) are not multiplied."""
+    # 2 HIGH in SKILL.md (non-executable) = 2 × 25 = 50 (no 1.3x)
+    state: SkillspectorState = {
+        "filtered_findings": [
+            _finding("P1", "HIGH", file="SKILL.md"),
+            _finding("P2", "HIGH", file="SKILL.md"),
+        ],
+        "component_metadata": [
+            {
+                "path": "SKILL.md",
+                "type": "markdown",
+                "lines": 10,
+                "executable": False,
+                "size_bytes": 500,
+            },
+            {"path": "run.py", "type": "python", "lines": 5, "executable": True, "size_bytes": 200},
+        ],
+        "has_executable_scripts": True,
+        "manifest": {},
+        "skill_path": "/tmp/skill",
+        "output_format": "json",
+    }
+    result = report(state)
+    # Without the multiplier: 2 HIGH = 50, not 65
+    assert result["risk_score"] == 50
+    assert result["risk_severity"] == "MEDIUM"
